@@ -25,7 +25,7 @@ Vagrant.configure("2") do |config|
       sysctl --system
 
       echo "Installing dependencies..."
-      dnf install -y epel-release yum-utils wget
+      dnf install -y epel-release yum-utils wget curl
       dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
       dnf install -y containerd.io
 
@@ -54,7 +54,11 @@ EOF
       sysctl --system
 
       echo "Adding Kubernetes repository..."
-      cat <<EOF | tee /etc/yum.repos.d/kubernetes.repo
+      # First, make sure any old repos are removed
+      rm -f /etc/yum.repos.d/kubernetes.repo
+
+      # Create the repository file
+      cat <<EOF > /etc/yum.repos.d/kubernetes.repo
 [kubernetes]
 name=Kubernetes
 baseurl=https://pkgs.k8s.io/core:/stable:/v1.32/rpm/
@@ -63,8 +67,42 @@ gpgcheck=1
 gpgkey=https://pkgs.k8s.io/core:/stable:/v1.32/rpm/repodata/repomd.xml.key
 EOF
 
+      # Check if repo was created successfully
+      if [ ! -f /etc/yum.repos.d/kubernetes.repo ]; then
+        echo "ERROR: Failed to create Kubernetes repository file. Creating it again."
+        cat <<EOF > /etc/yum.repos.d/kubernetes.repo
+[kubernetes]
+name=Kubernetes
+baseurl=https://pkgs.k8s.io/core:/stable:/v1.32/rpm/
+enabled=1
+gpgcheck=1
+gpgkey=https://pkgs.k8s.io/core:/stable:/v1.32/rpm/repodata/repomd.xml.key
+EOF
+      fi
+
+      # Verify repository and clean cache
+      dnf clean all
+      dnf makecache
+
       echo "Installing Kubernetes components..."
-      dnf install -y kubeadm kubelet kubectl
+      dnf install -y kubelet kubeadm kubectl
+      
+      # Verify installation was successful
+      if ! command -v kubectl &> /dev/null; then
+        echo "ERROR: kubectl installation failed. Trying alternative method."
+        curl -LO "https://dl.k8s.io/release/v1.32.2/bin/linux/amd64/kubectl"
+        chmod +x kubectl
+        mv kubectl /usr/local/bin/
+      fi
+      
+      # Check again and report result
+      if command -v kubectl &> /dev/null; then
+        echo "kubectl successfully installed at $(which kubectl)"
+        kubectl version --client -o yaml
+      else
+        echo "FATAL: Failed to install kubectl! Cluster setup will likely fail."
+      fi
+      
       systemctl enable --now kubelet
 
       # Detect architecture and use appropriate CNI plugins
@@ -111,6 +149,64 @@ EOF
       cp /etc/kubernetes/admin.conf /vagrant/admin.conf
       chmod 644 /vagrant/admin.conf
     SHELL
+    
+    # Add bash profile customizations using proper file creation
+    master.vm.provision "shell", inline: <<-SHELL
+      echo "Setting up bash profile customizations..."
+      
+      # Create bash profile for master node (control plane)
+      cat > /root/.bash_profile << 'EOMASTER'
+# Kubernetes aliases
+alias k="kubectl"
+alias kgp="kubectl get pods"
+alias kgn="kubectl get nodes"
+alias kgs="kubectl get services"
+alias kgd="kubectl get deployments"
+alias kdp="kubectl describe pod"
+alias kdn="kubectl describe node"
+
+# ETCD helpers
+export ETCDCTL_API=3
+alias etcdctl="kubectl -n kube-system exec -it etcd-k8s-master -- etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key"
+
+# Bash completion for kubectl
+source <(kubectl completion bash)
+complete -F __start_kubectl k
+
+# CKA exam shortcuts
+alias kc="kubectl create -f"
+alias kaf="kubectl apply -f"
+alias keti="kubectl exec -ti"
+alias kcns="kubectl create namespace"
+alias kd="kubectl delete"
+alias kgns="kubectl get namespaces"
+alias kge="kubectl get events --sort-by=.metadata.creationTimestamp"
+
+# Bash History settings
+export HISTSIZE=10000
+export HISTFILESIZE=20000
+export HISTTIMEFORMAT="%d/%m/%y %T "
+
+# System info on login
+echo "-------------------------------------"
+echo "Kubernetes Lab Environment - Control Plane"
+echo "$(kubectl version --short 2>/dev/null || echo 'Run as root to see kubectl version')"
+echo "-------------------------------------"
+
+# Make sure kubectl is in the PATH
+export PATH=$PATH:/usr/local/bin:/usr/bin
+EOMASTER
+
+      # Copy to vagrant user
+      cp /root/.bash_profile /home/vagrant/.bash_profile
+      chown vagrant:vagrant /home/vagrant/.bash_profile
+      
+      # Also add to .bashrc to ensure it works with non-login shells
+      cp /root/.bash_profile /root/.bashrc
+      cp /home/vagrant/.bash_profile /home/vagrant/.bashrc
+      
+      echo "Bash profiles have been set up on the master node."
+    SHELL
   end
 
   # Worker nodes configuration
@@ -139,11 +235,15 @@ EOF
         echo "Join command found, proceeding with setup..."
 
         echo "Setting up repositories..."
-        dnf install -y epel-release yum-utils wget
+        dnf install -y epel-release yum-utils wget curl
         dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
         
         echo "Adding Kubernetes repository..."
-        cat <<EOF | tee /etc/yum.repos.d/kubernetes.repo
+        # First, make sure any old repos are removed
+        rm -f /etc/yum.repos.d/kubernetes.repo
+
+        # Create the repository file
+        cat <<EOF > /etc/yum.repos.d/kubernetes.repo
 [kubernetes]
 name=Kubernetes
 baseurl=https://pkgs.k8s.io/core:/stable:/v1.32/rpm/
@@ -151,6 +251,23 @@ enabled=1
 gpgcheck=1
 gpgkey=https://pkgs.k8s.io/core:/stable:/v1.32/rpm/repodata/repomd.xml.key
 EOF
+
+        # Check if repo was created successfully
+        if [ ! -f /etc/yum.repos.d/kubernetes.repo ]; then
+          echo "ERROR: Failed to create Kubernetes repository file. Creating it again."
+          cat <<EOF > /etc/yum.repos.d/kubernetes.repo
+[kubernetes]
+name=Kubernetes
+baseurl=https://pkgs.k8s.io/core:/stable:/v1.32/rpm/
+enabled=1
+gpgcheck=1
+gpgkey=https://pkgs.k8s.io/core:/stable:/v1.32/rpm/repodata/repomd.xml.key
+EOF
+        fi
+
+        # Verify repository and clean cache
+        dnf clean all
+        dnf makecache
         
         echo "Installing containerd..."
         dnf install -y containerd.io
@@ -203,7 +320,24 @@ EOF
         rm -f cni-plugins.tgz
 
         echo "Installing Kubernetes components..."
-        dnf install -y kubeadm kubelet kubectl
+        dnf install -y kubelet kubeadm kubectl
+        
+        # Verify installation was successful
+        if ! command -v kubectl &> /dev/null; then
+          echo "ERROR: kubectl installation failed. Trying alternative method."
+          curl -LO "https://dl.k8s.io/release/v1.32.2/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          mv kubectl /usr/local/bin/
+        fi
+        
+        # Check again and report result
+        if command -v kubectl &> /dev/null; then
+          echo "kubectl successfully installed at $(which kubectl)"
+          kubectl version --client -o yaml
+        else
+          echo "FATAL: Failed to install kubectl! Node setup will continue but may have issues."
+        fi
+        
         systemctl enable --now kubelet
 
         echo "Joining Kubernetes cluster..."
@@ -235,6 +369,60 @@ EOF
         cp /vagrant/admin.conf /home/vagrant/.kube/config
         chown vagrant:vagrant /home/vagrant/.kube/config
         echo "export KUBECONFIG=/home/vagrant/.kube/config" >> /home/vagrant/.bashrc
+      SHELL
+      
+      # Add bash profile customizations for worker nodes
+      worker.vm.provision "shell", inline: <<-SHELL
+        echo "Setting up bash profile customizations..."
+        
+        # Create bash profile for worker node
+        cat > /root/.bash_profile << 'EOWORKER'
+# Kubernetes aliases
+alias k="kubectl"
+alias kgp="kubectl get pods"
+alias kgn="kubectl get nodes"
+alias kgs="kubectl get services"
+alias kgd="kubectl get deployments"
+alias kdp="kubectl describe pod"
+alias kdn="kubectl describe node"
+
+# Bash completion for kubectl
+source <(kubectl completion bash)
+complete -F __start_kubectl k
+
+# CKA exam shortcuts
+alias kc="kubectl create -f"
+alias kaf="kubectl apply -f"
+alias keti="kubectl exec -ti"
+alias kcns="kubectl create namespace"
+alias kd="kubectl delete"
+alias kgns="kubectl get namespaces"
+alias kge="kubectl get events --sort-by=.metadata.creationTimestamp"
+
+# Bash History settings
+export HISTSIZE=10000
+export HISTFILESIZE=20000
+export HISTTIMEFORMAT="%d/%m/%y %T "
+
+# System info on login
+echo "-------------------------------------"
+echo "Kubernetes Lab Environment - Worker Node"
+echo "$(kubectl version --short 2>/dev/null || echo 'Run as root to see kubectl version')"
+echo "-------------------------------------"
+
+# Make sure kubectl is in the PATH
+export PATH=$PATH:/usr/local/bin:/usr/bin
+EOWORKER
+
+        # Copy to vagrant user
+        cp /root/.bash_profile /home/vagrant/.bash_profile
+        chown vagrant:vagrant /home/vagrant/.bash_profile
+        
+        # Also add to .bashrc to ensure it works with non-login shells
+        cp /root/.bash_profile /root/.bashrc
+        cp /home/vagrant/.bash_profile /home/vagrant/.bashrc
+        
+        echo "Bash profiles have been set up on worker node $(hostname)."
       SHELL
     end
   end
