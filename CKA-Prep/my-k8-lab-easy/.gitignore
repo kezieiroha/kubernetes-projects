@@ -1,0 +1,23 @@
+# Ignore Terraform state files
+*.tfstate
+*.tfstate.backup
+
+# Ignore Terraform variables override files
+*.tfvars
+
+# Ignore Terraform provider and module directories
+.terraform/
+
+# Ignore Terraform plan files
+*.tfplan
+.txt
+.out
+.backup
+
+# Ignore sensitive files (e.g., private keys)
+*.pem
+*.key
+
+# Ignore DS Store (macbook)
+.DS_Store
+.vagrant
