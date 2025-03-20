@@ -15,6 +15,16 @@ Vagrant.configure("2") do |config|
       v.cpus = 2
     end
 
+    # Fix DNS before anything else
+    master.vm.provision "shell", inline: <<-SHELL
+      echo "Setting up DNS..."
+      echo "nameserver 8.8.8.8" > /etc/resolv.conf
+      echo "nameserver 8.8.4.4" >> /etc/resolv.conf
+      echo "search localdomain" >> /etc/resolv.conf
+      echo "Testing DNS..."
+      ping -c 1 github.com || echo "DNS still not working, but continuing..."
+    SHELL
+
     master.vm.provision "shell", inline: <<-SHELL
       echo "Disabling swap..."
       swapoff -a
@@ -27,7 +37,7 @@ Vagrant.configure("2") do |config|
       echo "Installing dependencies..."
       dnf install -y epel-release yum-utils wget curl
       dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-      dnf install -y containerd.io
+      dnf install -y containerd.io bash-completion jq net-tools
 
       echo "Configuring containerd..."
       mkdir -p /etc/containerd
@@ -54,74 +64,18 @@ EOF
       sysctl --system
 
       echo "Adding Kubernetes repository..."
-      # First, make sure any old repos are removed
-      rm -f /etc/yum.repos.d/kubernetes.repo
-
-      # Create the repository file
       cat <<EOF > /etc/yum.repos.d/kubernetes.repo
 [kubernetes]
 name=Kubernetes
-baseurl=https://pkgs.k8s.io/core:/stable:/v1.32/rpm/
+baseurl=https://pkgs.k8s.io/core:/stable:/v1.28/rpm/
 enabled=1
 gpgcheck=1
-gpgkey=https://pkgs.k8s.io/core:/stable:/v1.32/rpm/repodata/repomd.xml.key
+gpgkey=https://pkgs.k8s.io/core:/stable:/v1.28/rpm/repodata/repomd.xml.key
 EOF
-
-      # Check if repo was created successfully
-      if [ ! -f /etc/yum.repos.d/kubernetes.repo ]; then
-        echo "ERROR: Failed to create Kubernetes repository file. Creating it again."
-        cat <<EOF > /etc/yum.repos.d/kubernetes.repo
-[kubernetes]
-name=Kubernetes
-baseurl=https://pkgs.k8s.io/core:/stable:/v1.32/rpm/
-enabled=1
-gpgcheck=1
-gpgkey=https://pkgs.k8s.io/core:/stable:/v1.32/rpm/repodata/repomd.xml.key
-EOF
-      fi
-
-      # Verify repository and clean cache
-      dnf clean all
-      dnf makecache
 
       echo "Installing Kubernetes components..."
       dnf install -y kubelet kubeadm kubectl
-      
-      # Verify installation was successful
-      if ! command -v kubectl &> /dev/null; then
-        echo "ERROR: kubectl installation failed. Trying alternative method."
-        curl -LO "https://dl.k8s.io/release/v1.32.2/bin/linux/amd64/kubectl"
-        chmod +x kubectl
-        mv kubectl /usr/local/bin/
-      fi
-      
-      # Check again and report result
-      if command -v kubectl &> /dev/null; then
-        echo "kubectl successfully installed at $(which kubectl)"
-        kubectl version --client -o yaml
-      else
-        echo "FATAL: Failed to install kubectl! Cluster setup will likely fail."
-      fi
-      
       systemctl enable --now kubelet
-
-      # Detect architecture and use appropriate CNI plugins
-      ARCH=$(uname -m)
-      echo "Detected architecture: $ARCH"
-
-      echo "Installing CNI plugins for $ARCH architecture..."
-      mkdir -p /opt/cni/bin
-      
-      if [ "$ARCH" == "aarch64" ] || [ "$ARCH" == "arm64" ]; then
-        # ARM64 architecture
-        wget https://github.com/containernetworking/plugins/releases/download/v1.3.0/cni-plugins-linux-arm64-v1.3.0.tgz -O cni-plugins.tgz
-      else
-        # Default to AMD64
-        wget https://github.com/containernetworking/plugins/releases/download/v1.3.0/cni-plugins-linux-amd64-v1.3.0.tgz -O cni-plugins.tgz
-      fi
-      
-      tar -C /opt/cni/bin -xzf cni-plugins.tgz
-      rm -f cni-plugins.tgz
 
       echo "Pulling Kubernetes images..."
       kubeadm config images pull
@@ -130,13 +84,18 @@ EOF
       # Use pod CIDR 10.244.0.0/16 which is the default for Flannel
       kubeadm init --apiserver-advertise-address=$(hostname -I | awk '{print $2}') --pod-network-cidr=10.244.0.0/16
 
+      echo "Setting up kubeconfig for root user..."
+      mkdir -p /root/.kube
+      cp -i /etc/kubernetes/admin.conf /root/.kube/config
+
       echo "Setting up kubeconfig for vagrant user..."
       mkdir -p /home/vagrant/.kube
       cp -i /etc/kubernetes/admin.conf /home/vagrant/.kube/config
       chown -R vagrant:vagrant /home/vagrant/.kube
 
       echo "Deploying Flannel CNI..."
-      kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
+      export KUBECONFIG=/etc/kubernetes/admin.conf
+      kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
 
       echo "Generating join command for worker nodes..."
       kubeadm token create --print-join-command > /vagrant/k8s-join-command.sh
@@ -145,18 +104,27 @@ EOF
 
     # Separate provisioning step to copy admin.conf after it's created
     master.vm.provision "shell", inline: <<-SHELL
+      if [ ! -f /etc/kubernetes/admin.conf ]; then
+        echo "ERROR: admin.conf does not exist. Kubernetes init likely failed."
+        exit 1
+      fi
+      
       echo "Copying admin.conf to /vagrant for worker nodes..."
       cp /etc/kubernetes/admin.conf /vagrant/admin.conf
       chmod 644 /vagrant/admin.conf
     SHELL
     
-    # Add bash profile customizations using proper file creation
-    master.vm.provision "shell", inline: <<-SHELL
+    # Add bash profile customizations
+    master.vm.provision "shell", inline: <<-'SHELL'
       echo "Setting up bash profile customizations..."
       
       # Create bash profile for master node (control plane)
       cat > /root/.bash_profile << 'EOMASTER'
-# Kubernetes aliases
+# ====================================================
+# Kubernetes CKA Exam Lab Environment - Control Plane
+# ====================================================
+
+# Basic Kubernetes aliases
 alias k="kubectl"
 alias kgp="kubectl get pods"
 alias kgn="kubectl get nodes"
@@ -165,22 +133,94 @@ alias kgd="kubectl get deployments"
 alias kdp="kubectl describe pod"
 alias kdn="kubectl describe node"
 
-# ETCD helpers
-export ETCDCTL_API=3
-alias etcdctl="kubectl -n kube-system exec -it etcd-k8s-master -- etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key"
+# All namespaces variants
+alias kgpa="kubectl get pods --all-namespaces"
+alias kgsa="kubectl get services --all-namespaces"
+alias kgda="kubectl get deployments --all-namespaces"
 
-# Bash completion for kubectl
-source <(kubectl completion bash)
-complete -F __start_kubectl k
+# Namespace management
+alias kns="kubectl config set-context --current --namespace"
+alias kgns="kubectl get namespaces"
+alias kgpn="kubectl get pods -n"  # Use like: kgpn kube-system
+alias kgdn="kubectl get deployments -n"
+alias kgsn="kubectl get services -n"
 
-# CKA exam shortcuts
+# Output formatting
+alias kgpw="kubectl get pods -o wide"
+alias kgnw="kubectl get nodes -o wide"
+alias kyaml="kubectl get -o yaml"
+alias kjson="kubectl get -o json"
+
+# Resource management
+alias kgcm="kubectl get configmaps"
+alias kgsec="kubectl get secrets"
+alias kgpv="kubectl get pv"
+alias kgpvc="kubectl get pvc"
+
+# Creation and application shortcuts
 alias kc="kubectl create -f"
 alias kaf="kubectl apply -f"
 alias keti="kubectl exec -ti"
 alias kcns="kubectl create namespace"
 alias kd="kubectl delete"
-alias kgns="kubectl get namespaces"
+
+# Events and logs
 alias kge="kubectl get events --sort-by=.metadata.creationTimestamp"
+alias kgel="kubectl get events --sort-by=.metadata.creationTimestamp | less"
+alias ktail="kubectl logs --tail=50 -f"
+
+# ETCD helpers
+export ETCDCTL_API=3
+alias etcdctl="kubectl -n kube-system exec -it etcd-k8s-master -- etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key"
+
+# ETCD backup/restore functions
+etcd-backup() {
+  TIMESTAMP=$(date +%Y-%m-%d_%H-%M-%S)
+  BACKUP_PATH=${1:-"/tmp/etcd-backup-$TIMESTAMP.db"}
+  echo "Creating etcd backup at $BACKUP_PATH"
+  etcdctl snapshot save $BACKUP_PATH
+  [ $? -eq 0 ] && echo "Backup complete" || echo "Backup failed"
+}
+
+etcd-status() {
+  echo "==== ETCD Health Status ===="
+  etcdctl endpoint health
+  echo ""
+  echo "==== ETCD Endpoints ===="
+  etcdctl endpoint status -w table
+  echo ""
+  echo "==== ETCD Members ===="
+  etcdctl member list -w table
+}
+
+# Show cluster information
+k-status() {
+  echo "==== Nodes Status ===="
+  kubectl get nodes -o wide
+  echo ""
+  echo "==== Control Plane Pods ===="
+  kubectl get pods -n kube-system | grep -E 'etcd|apiserver|controller|scheduler'
+  echo ""
+  echo "==== CNI Status ===="
+  kubectl get pods -n kube-flannel
+}
+
+# Recent events
+k-events() {
+  kubectl get events --sort-by=.metadata.creationTimestamp $@ | tail -20
+}
+
+# Simple fixed prompt
+export PS1="[k8s-master] \W$ "
+
+# Search for pods by partial name
+kfind() {
+  kubectl get pods --all-namespaces | grep "$1"
+}
+
+# Bash completion for kubectl
+source <(kubectl completion bash)
+complete -F __start_kubectl k
 
 # Bash History settings
 export HISTSIZE=10000
@@ -191,6 +231,9 @@ export HISTTIMEFORMAT="%d/%m/%y %T "
 echo "-------------------------------------"
 echo "Kubernetes Lab Environment - Control Plane"
 echo "$(kubectl version --short 2>/dev/null || echo 'Run as root to see kubectl version')"
+echo "-------------------------------------"
+echo "Useful commands: k-status, etcd-status, etcd-backup, k-events"
+echo "Quick help: type 'alias' to see all available shortcuts"
 echo "-------------------------------------"
 
 # Make sure kubectl is in the PATH
@@ -220,7 +263,20 @@ EOMASTER
         v.cpus = 2
       end
 
+      # Fix DNS before anything else
       worker.vm.provision "shell", inline: <<-SHELL
+        echo "Setting up DNS..."
+        echo "nameserver 8.8.8.8" > /etc/resolv.conf
+        echo "nameserver 8.8.4.4" >> /etc/resolv.conf
+        echo "search localdomain" >> /etc/resolv.conf
+        echo "Testing DNS..."
+        ping -c 1 github.com || echo "DNS still not working, but continuing..."
+      SHELL
+
+      worker.vm.provision "shell", inline: <<-SHELL
+        # Stop on any error
+        set -e
+        
         timeout=300
         elapsed=0
         while [ ! -f /vagrant/k8s-join-command.sh ]; do
@@ -239,35 +295,14 @@ EOMASTER
         dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
         
         echo "Adding Kubernetes repository..."
-        # First, make sure any old repos are removed
-        rm -f /etc/yum.repos.d/kubernetes.repo
-
-        # Create the repository file
         cat <<EOF > /etc/yum.repos.d/kubernetes.repo
 [kubernetes]
 name=Kubernetes
-baseurl=https://pkgs.k8s.io/core:/stable:/v1.32/rpm/
+baseurl=https://pkgs.k8s.io/core:/stable:/v1.28/rpm/
 enabled=1
 gpgcheck=1
-gpgkey=https://pkgs.k8s.io/core:/stable:/v1.32/rpm/repodata/repomd.xml.key
+gpgkey=https://pkgs.k8s.io/core:/stable:/v1.28/rpm/repodata/repomd.xml.key
 EOF
-
-        # Check if repo was created successfully
-        if [ ! -f /etc/yum.repos.d/kubernetes.repo ]; then
-          echo "ERROR: Failed to create Kubernetes repository file. Creating it again."
-          cat <<EOF > /etc/yum.repos.d/kubernetes.repo
-[kubernetes]
-name=Kubernetes
-baseurl=https://pkgs.k8s.io/core:/stable:/v1.32/rpm/
-enabled=1
-gpgcheck=1
-gpgkey=https://pkgs.k8s.io/core:/stable:/v1.32/rpm/repodata/repomd.xml.key
-EOF
-        fi
-
-        # Verify repository and clean cache
-        dnf clean all
-        dnf makecache
         
         echo "Installing containerd..."
         dnf install -y containerd.io
@@ -301,47 +336,19 @@ EOF
         swapoff -a
         sed -i '/swap/d' /etc/fstab
 
-        # Detect architecture and use appropriate CNI plugins
-        ARCH=$(uname -m)
-        echo "Detected architecture: $ARCH"
-
-        echo "Installing CNI plugins for $ARCH architecture..."
-        mkdir -p /opt/cni/bin
-        
-        if [ "$ARCH" == "aarch64" ] || [ "$ARCH" == "arm64" ]; then
-          # ARM64 architecture
-          wget https://github.com/containernetworking/plugins/releases/download/v1.3.0/cni-plugins-linux-arm64-v1.3.0.tgz -O cni-plugins.tgz
-        else
-          # Default to AMD64
-          wget https://github.com/containernetworking/plugins/releases/download/v1.3.0/cni-plugins-linux-amd64-v1.3.0.tgz -O cni-plugins.tgz
-        fi
-        
-        tar -C /opt/cni/bin -xzf cni-plugins.tgz
-        rm -f cni-plugins.tgz
-
         echo "Installing Kubernetes components..."
-        dnf install -y kubelet kubeadm kubectl
-        
-        # Verify installation was successful
-        if ! command -v kubectl &> /dev/null; then
-          echo "ERROR: kubectl installation failed. Trying alternative method."
-          curl -LO "https://dl.k8s.io/release/v1.32.2/bin/linux/amd64/kubectl"
-          chmod +x kubectl
-          mv kubectl /usr/local/bin/
-        fi
-        
-        # Check again and report result
-        if command -v kubectl &> /dev/null; then
-          echo "kubectl successfully installed at $(which kubectl)"
-          kubectl version --client -o yaml
-        else
-          echo "FATAL: Failed to install kubectl! Node setup will continue but may have issues."
-        fi
-        
+        dnf install -y kubelet kubeadm kubectl bash-completion jq net-tools
         systemctl enable --now kubelet
 
         echo "Joining Kubernetes cluster..."
-        bash /vagrant/k8s-join-command.sh
+        # Display the join command for debugging
+        echo "Join command:"
+        cat /vagrant/k8s-join-command.sh
+        
+        bash /vagrant/k8s-join-command.sh || {
+          echo "ERROR: Failed to join the cluster"
+          exit 1
+        }
       SHELL
 
       # Separate provisioning step to set up kubeconfig after joining the cluster
@@ -372,12 +379,18 @@ EOF
       SHELL
       
       # Add bash profile customizations for worker nodes
-      worker.vm.provision "shell", inline: <<-SHELL
+      worker.vm.provision "shell", inline: <<-"SHELL"
         echo "Setting up bash profile customizations..."
         
-        # Create bash profile for worker node
-        cat > /root/.bash_profile << 'EOWORKER'
-# Kubernetes aliases
+        # Create bash profile for worker node with hostname
+        hostname=$(hostname)
+        
+        cat > /root/.bash_profile << EOF
+# ====================================================
+# Kubernetes CKA Exam Lab Environment - Worker Node
+# ====================================================
+
+# Basic Kubernetes aliases
 alias k="kubectl"
 alias kgp="kubectl get pods"
 alias kgn="kubectl get nodes"
@@ -386,18 +399,70 @@ alias kgd="kubectl get deployments"
 alias kdp="kubectl describe pod"
 alias kdn="kubectl describe node"
 
-# Bash completion for kubectl
-source <(kubectl completion bash)
-complete -F __start_kubectl k
+# All namespaces variants
+alias kgpa="kubectl get pods --all-namespaces"
+alias kgsa="kubectl get services --all-namespaces"
+alias kgda="kubectl get deployments --all-namespaces"
 
-# CKA exam shortcuts
+# Namespace management
+alias kns="kubectl config set-context --current --namespace"
+alias kgns="kubectl get namespaces"
+alias kgpn="kubectl get pods -n"  # Use like: kgpn kube-system
+alias kgdn="kubectl get deployments -n"
+alias kgsn="kubectl get services -n"
+
+# Output formatting
+alias kgpw="kubectl get pods -o wide"
+alias kgnw="kubectl get nodes -o wide"
+alias kyaml="kubectl get -o yaml"
+alias kjson="kubectl get -o json"
+
+# Resource management
+alias kgcm="kubectl get configmaps"
+alias kgsec="kubectl get secrets"
+alias kgpv="kubectl get pv"
+alias kgpvc="kubectl get pvc"
+
+# Creation and application shortcuts
 alias kc="kubectl create -f"
 alias kaf="kubectl apply -f"
 alias keti="kubectl exec -ti"
 alias kcns="kubectl create namespace"
 alias kd="kubectl delete"
-alias kgns="kubectl get namespaces"
+
+# Events and logs
 alias kge="kubectl get events --sort-by=.metadata.creationTimestamp"
+alias kgel="kubectl get events --sort-by=.metadata.creationTimestamp | less"
+alias ktail="kubectl logs --tail=50 -f"
+
+# Show cluster information
+k-status() {
+  echo "==== Nodes Status ===="
+  kubectl get nodes -o wide
+  echo ""
+  echo "==== Control Plane Pods ===="
+  kubectl get pods -n kube-system | grep -E 'etcd|apiserver|controller|scheduler'
+  echo ""
+  echo "==== CNI Status ===="
+  kubectl get pods -n kube-flannel
+}
+
+# Recent events
+k-events() {
+  kubectl get events --sort-by=.metadata.creationTimestamp \$@ | tail -20
+}
+
+# Simple fixed prompt with hostname
+export PS1="[$hostname] \\W\\$ "
+
+# Search for pods by partial name
+kfind() {
+  kubectl get pods --all-namespaces | grep "\$1"
+}
+
+# Bash completion for kubectl
+source <(kubectl completion bash)
+complete -F __start_kubectl k
 
 # Bash History settings
 export HISTSIZE=10000
@@ -407,12 +472,15 @@ export HISTTIMEFORMAT="%d/%m/%y %T "
 # System info on login
 echo "-------------------------------------"
 echo "Kubernetes Lab Environment - Worker Node"
-echo "$(kubectl version --short 2>/dev/null || echo 'Run as root to see kubectl version')"
+echo "\$(kubectl version --short 2>/dev/null || echo 'Run as root to see kubectl version')"
+echo "-------------------------------------"
+echo "Useful commands: k-status, k-events, kfind"
+echo "Quick help: type 'alias' to see all available shortcuts"
 echo "-------------------------------------"
 
 # Make sure kubectl is in the PATH
-export PATH=$PATH:/usr/local/bin:/usr/bin
-EOWORKER
+export PATH=\$PATH:/usr/local/bin:/usr/bin
+EOF
 
         # Copy to vagrant user
         cp /root/.bash_profile /home/vagrant/.bash_profile
