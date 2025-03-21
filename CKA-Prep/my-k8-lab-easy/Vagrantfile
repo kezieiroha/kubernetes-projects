@@ -9,7 +9,7 @@ Vagrant.configure("2") do |config|
   config.vm.define "k8s-master" do |master|
     master.vm.box = "almalinux/9"
     master.vm.hostname = "k8s-master"
-    master.vm.network "private_network", type: "dhcp"
+    master.vm.network "private_network", ip: "192.168.56.10" # Use static IP
     master.vm.provider "vmware_desktop" do |v|
       v.memory = 4096
       v.cpus = 2
@@ -80,9 +80,12 @@ EOF
       echo "Pulling Kubernetes images..."
       kubeadm config images pull
 
+      # Use the static IP for initialization
+      MASTER_IP="192.168.56.10"
+      echo "Using Master IP: $MASTER_IP for cluster initialization"
+      
       echo "Initializing Kubernetes cluster..."
-      # Use pod CIDR 10.244.0.0/16 which is the default for Flannel
-      kubeadm init --apiserver-advertise-address=$(hostname -I | awk '{print $2}') --pod-network-cidr=10.244.0.0/16
+      kubeadm init --apiserver-advertise-address=$MASTER_IP --pod-network-cidr=10.244.0.0/16
 
       echo "Setting up kubeconfig for root user..."
       mkdir -p /root/.kube
@@ -97,20 +100,19 @@ EOF
       export KUBECONFIG=/etc/kubernetes/admin.conf
       kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
 
-      echo "Generating join command for worker nodes..."
-      kubeadm token create --print-join-command > /vagrant/k8s-join-command.sh
+      # Create join command using the static IP
+      echo "Creating join command with IP: $MASTER_IP"
+      kubeadm token create --print-join-command > /vagrant/k8s-join-command.tmp
+      sed "s/[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+/$MASTER_IP/g" /vagrant/k8s-join-command.tmp > /vagrant/k8s-join-command.sh
       chmod +x /vagrant/k8s-join-command.sh
-    SHELL
-
-    # Separate provisioning step to copy admin.conf after it's created
-    master.vm.provision "shell", inline: <<-SHELL
-      if [ ! -f /etc/kubernetes/admin.conf ]; then
-        echo "ERROR: admin.conf does not exist. Kubernetes init likely failed."
-        exit 1
-      fi
       
-      echo "Copying admin.conf to /vagrant for worker nodes..."
-      cp /etc/kubernetes/admin.conf /vagrant/admin.conf
+      # Setup hosts files on master
+      echo "$MASTER_IP k8s-master" >> /etc/hosts
+      echo "192.168.56.11 k8s-worker1" >> /etc/hosts
+      echo "192.168.56.12 k8s-worker2" >> /etc/hosts
+      
+      # Copy admin.conf for worker nodes, ensure it has the right IP
+      sed "s/[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+/$MASTER_IP/g" /etc/kubernetes/admin.conf > /vagrant/admin.conf
       chmod 644 /vagrant/admin.conf
     SHELL
     
@@ -253,11 +255,13 @@ EOMASTER
   end
 
   # Worker nodes configuration
-  ["k8s-worker1", "k8s-worker2"].each do |worker_name|
+  worker_ips = {"k8s-worker1" => "192.168.56.11", "k8s-worker2" => "192.168.56.12"}
+  
+  worker_ips.each do |worker_name, worker_ip|
     config.vm.define worker_name do |worker|
       worker.vm.box = "almalinux/9"
       worker.vm.hostname = worker_name
-      worker.vm.network "private_network", type: "dhcp"
+      worker.vm.network "private_network", ip: worker_ip # Use static IP
       worker.vm.provider "vmware_desktop" do |v|
         v.memory = 4096
         v.cpus = 2
@@ -274,8 +278,8 @@ EOMASTER
       SHELL
 
       worker.vm.provision "shell", inline: <<-SHELL
-        # Stop on any error
-        set -e
+        # Don't stop on error
+        set +e
         
         timeout=300
         elapsed=0
@@ -340,6 +344,16 @@ EOF
         dnf install -y kubelet kubeadm kubectl bash-completion jq net-tools
         systemctl enable --now kubelet
 
+        # Setup /etc/hosts with static IPs
+        echo "192.168.56.10 k8s-master" >> /etc/hosts
+        echo "192.168.56.11 k8s-worker1" >> /etc/hosts
+        echo "192.168.56.12 k8s-worker2" >> /etc/hosts
+        
+        # Test connectivity to master
+        echo "Testing connectivity to master node (192.168.56.10)..."
+        ping -c 3 192.168.56.10
+        ping -c 3 k8s-master
+        
         echo "Joining Kubernetes cluster..."
         # Display the join command for debugging
         echo "Join command:"
@@ -347,6 +361,8 @@ EOF
         
         bash /vagrant/k8s-join-command.sh || {
           echo "ERROR: Failed to join the cluster"
+          echo "Trying again with debug output..."
+          bash /vagrant/k8s-join-command.sh --v=5
           exit 1
         }
       SHELL
@@ -365,6 +381,7 @@ EOF
             exit 1
           fi
         done
+        
         echo "Copying admin.conf to both system and user locations..."
         # System location
         mkdir -p /etc/kubernetes
@@ -374,7 +391,7 @@ EOF
         # User location (for convenience)
         mkdir -p /home/vagrant/.kube
         cp /vagrant/admin.conf /home/vagrant/.kube/config
-        chown vagrant:vagrant /home/vagrant/.kube/config
+        chown -R vagrant:vagrant /home/vagrant/.kube
         echo "export KUBECONFIG=/home/vagrant/.kube/config" >> /home/vagrant/.bashrc
       SHELL
       
