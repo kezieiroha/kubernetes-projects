@@ -47,6 +47,7 @@ Vagrant.configure("2") do |config|
       systemctl restart containerd
       systemctl enable containerd --now
 
+      # Add crictl configuration
       echo "Configuring crictl..."
       echo "runtime-endpoint: unix:///run/containerd/containerd.sock" > /etc/crictl.yaml
       echo "image-endpoint: unix:///run/containerd/containerd.sock" >> /etc/crictl.yaml
@@ -103,6 +104,14 @@ EOF
       echo "Deploying Flannel CNI..."
       export KUBECONFIG=/etc/kubernetes/admin.conf
       kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
+
+      # Add metrics server installation
+      echo "Installing Metrics Server for kubectl top command..."
+      kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+      # Wait for the metrics-server deployment to be created
+      sleep 10
+      # Patch metrics-server to work in lab environment
+      kubectl patch deployment metrics-server -n kube-system --type='json' -p='[{"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--kubelet-insecure-tls"}]'
 
       # Create join command using the static IP
       echo "Creating join command with IP: $MASTER_IP"
@@ -323,6 +332,7 @@ EOF
         systemctl restart containerd
         systemctl enable --now containerd
 
+        # Add crictl configuration
         echo "Configuring crictl..."
         echo "runtime-endpoint: unix:///run/containerd/containerd.sock" > /etc/crictl.yaml
         echo "image-endpoint: unix:///run/containerd/containerd.sock" >> /etc/crictl.yaml
@@ -478,7 +488,7 @@ k-events() {
 }
 
 # Simple fixed prompt with hostname
-export PS1="[$hostname] \\W\\$ "
+export PS1="[\$hostname] \\W\\$ "
 
 # Search for pods by partial name
 kfind() {
