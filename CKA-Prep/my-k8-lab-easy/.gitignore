@@ -18,6 +18,7 @@
 *.pem
 *.key
 *.conf 
+*.log
 
 # Ignore DS Store (macbook)
 .DS_Store
