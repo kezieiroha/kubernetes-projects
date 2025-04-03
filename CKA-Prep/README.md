@@ -1,7 +1,7 @@
 # Kezie Iroha
 # Kubernetes CKA Study Resources
 
-This is my personal repository contains lab configuration for the Certified Kubernetes Administrator (CKA) exam preparation.
+This is my personal repository and contains lab configuration for the Certified Kubernetes Administrator (CKA) exam preparation.
 
 ## What's Included
 
