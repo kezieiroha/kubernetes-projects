@@ -38,10 +38,10 @@ Ensure your host machine has at least:
    ```
 
 4. The setup creates four VMs:
-   - `jumpbox`: Administration host (2 CPU, 1GB RAM)
-   - `server`: Kubernetes control plane (2 CPU, 2GB RAM)
-   - `node-0`: Kubernetes worker (2 CPU, 2GB RAM)
-   - `node-1`: Kubernetes worker (2 CPU, 2GB RAM)
+   - `jumpbox`: Administration host (1 CPU, 512M RAM)
+   - `server`: Kubernetes control plane (1 CPU, 2GB RAM)
+   - `node-0`: Kubernetes worker (1 CPU, 2GB RAM)
+   - `node-1`: Kubernetes worker (1 CPU, 2GB RAM)
 
 5. Access the jumpbox:
    ```bash
@@ -50,17 +50,17 @@ Ensure your host machine has at least:
 
 6. Switch to the root user (required for the tutorial):
    ```bash
-   sudo -i
+   sudo -i # sudo to root user. The root password is set to kuberoot for the lab hosts.
    ```
 
 ## VM Information
 
 | Name     | IP Address       | Role               | Specs                   |
 |----------|------------------|--------------------| ------------------------|
-| jumpbox  | Auto-assigned    | Administration     | 2 CPU, 1GB RAM, 10GB    |
-| server   | Auto-assigned    | Control Plane      | 2 CPU, 2GB RAM, 20GB    |
-| node-0   | Auto-assigned    | Worker Node        | 2 CPU, 2GB RAM, 20GB    |
-| node-1   | Auto-assigned    | Worker Node        | 2 CPU, 2GB RAM, 20GB    |
+| jumpbox  | Auto-assigned    | Administration     | 1 CPU, 512M RAM, 10GB   |
+| server   | Auto-assigned    | Control Plane      | 1 CPU, 2GB RAM, 20GB    |
+| node-0   | Auto-assigned    | Worker Node        | 1 CPU, 2GB RAM, 20GB    |
+| node-1   | Auto-assigned    | Worker Node        | 1 CPU, 2GB RAM, 20GB    |
 
 The IP addresses are dynamically assigned. You can view them with:
 ```bash
