@@ -59,6 +59,10 @@ EOF"
         
         # Restart SSH service
         multipass exec "$VM" -- sudo systemctl restart ssh
+        
+        # Disable cloud-init's management of /etc/hosts
+        echo "Disabling cloud-init's management of /etc/hosts on $VM..."
+        multipass exec "$VM" -- sudo bash -c "sed -i 's/manage_etc_hosts: true/manage_etc_hosts: false/' /etc/cloud/cloud.cfg 2>/dev/null || echo 'manage_etc_hosts: false' >> /etc/cloud/cloud.cfg"
     done
     
     # Install common tools on all VMs
